@@ -1,0 +1,283 @@
+---
+title: "Mold project Census data cleaning"
+author: "Jenna Tipaldo"
+date: "2025-07-30"
+output: html_document
+---
+
+# Load Packages
+
+```{r load}
+library(data.table)
+library(tidyverse)
+library(lubridate) #for dates
+library(zoo) # for yearmon()
+library(stats) #for ts()
+library(TSstudio)
+library(haven)
+library(stargazer)
+library(sjPlot) #model tables
+library(tidycensus)
+census_api_key("") #REPLACE WITH YOUR OWN KEY
+```
+
+#Load tract file unclipped (with water) from NYC DCP & clean
+2020 tracts Latest Release: 25C, Date of Data: August 2025
+https://www.nyc.gov/content/planning/pages/resources/datasets/census-tracts 
+```{r}
+tracts20<-st_read("nyctracts2020water/nyct2020wi.shp")
+
+tracts20<- tracts20%>%
+  select(GEOID, BoroName, NTA2020, Shape_Area)
+```
+
+
+# Census: total pop from tidycensus & join to shapefile
+```{r}
+totpop20<-get_decennial(
+  geography = "tract",
+  state = "NY",
+  variables = "P1_001N",
+  year = 2020,
+  #sumfile = "dhc",
+  geometry = F
+  )
+
+summary(totpop20$value)
+
+totpop20<- totpop20%>%
+  rename(totpop=value)%>%
+  select(-variable, -NAME)
+
+
+tracts20 <- left_join(tracts20, totpop20, by="GEOID")
+```
+
+Census API tips: use NHGIS to search and find source tables, then use the NHGIS codebook or this site to determine what the variables represent when you do the API pull: https://api.census.gov/data.html
+
+# Read in census data and recode to BCT (boro census tract for merge)
+Value | Borough name | FIPS State County code
+1 Manhattan 36061
+2 Bronx 36005
+3 Brooklyn 36047
+4 Queens 36081
+5 Staten Island 36085
+```{r}
+# ALTERNATIVE: NHGIS data
+#nhgis_blocks<-read.csv("nhgis0023_ds258_2020_block.csv")
+
+#List tables of interest (see above, can use NHGIS to help find tables)
+tables <- c("H4") #, "P15", "H10"
+
+# Loop over each table and bind the results into one data frame
+tracts20_variables <- map_dfr(tables, ~get_decennial(
+  geography = "tract",
+  state = "NY",
+  table = .x,
+  year = 2020,
+  sumfile = "dhc",
+  geometry = F
+  ))
+
+head(tracts20_variables)
+
+tracts20_variables_wide <- tracts20_variables %>%
+  filter(substr(GEOID, 1,5)%in%c("36061","36005","36047","36081","36085"))%>%
+  dplyr::select(GEOID, NAME, variable, value) %>%
+  pivot_wider(names_from = variable, values_from = value)%>%
+  mutate(BCT2020 = case_when(
+    substr(GEOID, 1,5) == "36061" ~ paste0("1",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36005" ~ paste0("2",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36047" ~ paste0("3",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36081" ~ paste0("4",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36085" ~ paste0("5",substr(GEOID, 6,11))
+  ),
+  BCT2020 = as.integer(BCT2020))
+
+tracts20_variables_wide <- tracts20_variables_wide %>%
+  mutate(check = if_else(H4_001N == H4_002N+H4_003N+H4_004N, 1, 0))%>%
+  rename(
+    housingunits_total=H4_001N,
+    housingunits_ownedmortgage=H4_002N,
+    housingunits_ownedclear=H4_003N,
+    housingunits_renters=H4_004N,
+  )
+
+table(tracts20_variables_wide$check, useNA = "always")
+
+tracts20_variables_wide<- tracts20_variables_wide%>%
+  select(-NAME, -check)
+
+tracts20 <- left_join(tracts20, tracts20_variables_wide, by="GEOID")
+```
+
+
+#additional census info (still needs cleaning based on geography changes)
+```{r}
+#List tables of interest (see above, can use NHGIS to help find tables)
+tables <- c("H10","H12") #, "P15", "H10"
+
+# Loop over each table and bind the results into one data frame
+tracts20_additional <- map_dfr(tables, ~get_decennial(
+  geography = "tract",
+  state = "NY",
+  table = .x,
+  year = 2020,
+  sumfile = "dhc",
+  geometry = F
+  ))
+
+codebook <- load_variables(2020, "acs5") #add /subject
+view(codebook)
+
+head(tracts20_additional)
+
+tracts_ACS_wide <- tracts20_additional %>%
+  filter(substr(GEOID, 1,5)%in%c("36061","36005","36047","36081","36085"))%>%
+  dplyr::select(GEOID, NAME, variable,source,estimate, moe) %>%
+  pivot_wider(id_cols = c(GEOID), names_from = c(variable, source), values_from = c(estimate, moe))%>%
+  mutate(BCT2020 = case_when(
+    substr(GEOID, 1,5) == "36061" ~ paste0("1",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36005" ~ paste0("2",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36047" ~ paste0("3",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36081" ~ paste0("4",substr(GEOID, 6,11)),
+    substr(GEOID, 1,5) == "36085" ~ paste0("5",substr(GEOID, 6,11))
+  ),
+  BCT2020 = as.integer(BCT2020))
+
+# years <- c(2013, 2018, 2023) #if can figure out continuity
+years <- c(2020, 2021)
+tracts20only_additional <- map_dfr(years, ~get_acs(
+  geography = "tract",
+  state = "NY",
+  survey = "acs5",
+  #table = .x,
+  variables = c(medianincome = "B19013_001", englishlow_foreignborn="B16005I_011", englishlow_native="B16005I_006",english_total="B16005I_001",
+                race_NHwhite="B03002_003",race_NHblack="B03002_004",race_hispanic="B03002_012", race_total="B03002_001"),
+  year = .x,
+  geometry = F
+  )%>% 
+    mutate(source=.x) #adds column for the ID
+  )
+
+
+tracts20only_ACS_wide <- tracts20only_additional %>%
+  filter(substr(GEOID, 1,5)%in%c("36061","36005","36047","36081","36085"))%>%
+  dplyr::select(GEOID, NAME, variable,source,estimate, moe) %>%
+  pivot_wider(id_cols = c(GEOID), names_from = c(variable, source), values_from = c(estimate, moe))
+
+summary(tracts20only_ACS_wide$estimate_medianincome_2020)
+
+tracts20only_ACS_wide_recode <- tracts20only_ACS_wide %>%
+  mutate(lowenglish20 = (estimate_englishlow_foreignborn_2020+estimate_englishlow_native_2020)/estimate_english_total_2020 *100,
+         NHblack20 = estimate_race_NHblack_2020 / estimate_race_total_2020 *100,
+         medinc20 = estimate_medianincome_2020)%>%
+  select(GEOID, medinc20, NHblack20, lowenglish20)
+
+tracts20<- left_join(tracts20,tracts20only_ACS_wide_recode, by="GEOID")
+```
+
+
+
+# save final shapefile with Census info
+```{r}
+
+write.csv(tracts20, "nyc_tracts_2020_info.csv")
+
+tracts20_namescleaned<- tracts20%>%
+  select(-housingunits_ownedmortgage, -housingunits_ownedclear,
+         -Shape_Area)%>%
+  rename(
+    HU_tot = housingunits_total,
+    HU_rent= housingunits_renters
+  )
+
+st_write(tracts20_namescleaned, "nyc_tracts_2020_info.shp")
+
+```
+
+
+# read in and clean HUD NYCHA data
+```{r}
+publichousing<-read.csv("publichousing_2020tracts_in2022.csv")
+
+publichousing_recode<- publichousing%>%
+  rename(housingunits_publichousing = "Subsidized.units.available",
+         occupied_pct = "X..Occupied",
+         GEOID = "Code")%>%
+  mutate(GEOID = as.character(GEOID),
+         #for missing values (-4 is suppressed, -5 is lack of sufficient reporting, impute mean prop occupied)
+         occupied_prop = if_else(occupied_pct<0 , mean(occupied_pct)/100, occupied_pct/100),
+         housingunits_pubhousingoccupied = round(housingunits_publichousing * occupied_prop )
+         )#%>%
+  select(GEOID, housingunits_pubhousingoccupied)
+
+sum(publichousing_recode$housingunits_pubhousingoccupied)
+
+```
+
+# join HUD data to census tract data and calculate units 
+```{r}
+tracts_housingunits <- left_join(tracts20, publichousing_recode, by="GEOID")
+
+summary(tracts_housingunits$housingunits_publichousing)
+
+tracts_housingunits <- tracts_housingunits %>%
+  #zero out NA tracts
+  mutate(
+    #flag for any PH in tract
+    anypublichousing_tract = if_else(housingunits_pubhousingoccupied>0,1,0),
+    #replace NAs with 0s
+    housingunits_pubhousingoccupied = if_else(is.na(housingunits_pubhousingoccupied), 0, housingunits_pubhousingoccupied),
+    #replaces 5 tracts where PH units from HUD for 2022 were higher than 2020 total renters
+         housingunits_pubhousingoccupied = if_else(housingunits_pubhousingoccupied>housingunits_renters, housingunits_renters, housingunits_pubhousingoccupied), 
+    rentalunits_minusPH = housingunits_renters - housingunits_pubhousingoccupied
+         )
+```
+
+# save final shapefile & csv with public housing units
+
+```{r}
+write.csv(tracts_housingunits, "nyc_tracts_2020_infoHU.csv")
+
+tracts20_namescleaned_HU<- tracts_housingunits%>%
+  select(-housingunits_ownedmortgage, -housingunits_ownedclear, 
+         -Shape_Area, -housingunits_pubhousingoccupied, -anypublichousing_tract)%>%
+  rename(
+    HU_tot = housingunits_total,
+    HU_rent= housingunits_renters,
+    HUrentPH = rentalunits_minusPH
+  )
+
+st_write(tracts20_namescleaned_HU, "nyc_tracts_2020_infoHU.shp")
+
+
+```
+
+#shapefile with population
+```{r}
+
+summary(tracts_housingunits$totpop)
+
+quantile(tracts_housingunits$totpop, probs = .05)
+
+quantile(tracts_housingunits$housingunits_total, probs = .05)
+
+withpopulation<-tracts_housingunits%>%
+  filter(totpop>=500 | housingunits_total>=100)%>%
+  select(-housingunits_ownedmortgage, -housingunits_ownedclear, 
+         -Shape_Area, -housingunits_pubhousingoccupied, -anypublichousing_tract)%>%
+  rename(
+    HU_tot = housingunits_total,
+    HU_rent= housingunits_renters,
+    HUrentPH = rentalunits_minusPH
+  )
+
+excluded<-tracts_housingunits%>%
+  filter(totpop<500 | housingunits_total<100)
+
+
+st_write(withpopulation, "nyc_tracts_2020_infoHU_withpop.shp")
+```
+
+
