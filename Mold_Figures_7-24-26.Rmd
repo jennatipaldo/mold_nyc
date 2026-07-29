@@ -1,0 +1,478 @@
+---
+title: "Mold_Figures"
+author: "Jenna Tipaldo"
+date: "2026-7-24"
+output: html_document
+---
+
+# Load Packages
+
+```{r load}
+library(data.table)
+library(tidyverse)
+library(lubridate) #for dates
+library(zoo) # for yearmon()
+library(stats) #for ts()
+library(TSstudio)
+library(haven)
+library(lme4) #for multilevel modeling
+library(stargazer)
+library(sjPlot) #model tables
+library(sjlabelled) #for labels in plots
+library(sf) #for spatial shapefiles
+library(beepr) #to play a sound when it's done running
+```
+
+#Load data
+```{r}
+#file of overall 311 calls for any issue and for mold
+dailycomparison<- read.csv("mold_dailycomparison.csv")
+#mold complaints
+complaintsrecoded <- read_csv("complaintsrecoded.csv")
+```
+
+#Process data weekly
+```{r}
+#weekly
+date1 <- as.Date("2010-01-01")
+
+weeklycomparison <- dailycomparison%>%
+  mutate(weeknum = as.numeric(floor(difftime(day, date1, units = "weeks"))+1)
+         # Week_chr = str_pad(Week, width = 2, side = "left", pad = "0"),
+         # year_isoweek = paste0(Year,"-",Week_chr)
+         )%>%
+  #for each week
+  group_by(weeknum)%>%
+  summarize(weekstart = min(day),
+            week_end = max(day),
+            weeklyn_mold = sum(dailyn_mold, na.rm = T), #
+            weeklyn_overall = sum(dailyn_overall, na.rm = T), #
+            )%>%
+  ungroup()
+
+weeklycomparison <-weeklycomparison %>%
+  mutate(week_end = as.Date(week_end))
+
+```
+
+
+
+#Figure 1
+```{r}
+multiplier<-100 #to scale y-axis for the mold complaints
+
+figure1<-ggplot(weeklycomparison, aes(x=week_end))+
+  geom_line(aes(y=weeklyn_overall), color="black")+
+  geom_line(aes(y=weeklyn_mold*multiplier), color="darkgreen", alpha=0.7)+
+  scale_y_continuous(
+    name = "311 complaints for any issue (black)",
+    labels = scales::comma, #add comma
+    sec.axis = sec_axis(~ . / multiplier, name = "311 complaints for mold (green)",) # Inverse transformation for labels
+    
+  )+
+  scale_x_date(date_breaks= "1 year", date_labels = "%Y")+
+  labs(x="Week since 1/1/10")+
+  theme_classic(base_size = 24)+
+  geom_vline(aes(xintercept =as.Date("2011-08-21")), color="grey30",linetype=2, alpha=0.5)+
+  annotate("text",x=as.Date("2011-08-21"), y=158, color="grey30", label="Irene", size=6)+
+  geom_vline(aes(xintercept =as.Date("2012-10-29")), color="red", linetype=2,alpha=0.5)+
+  annotate("text",x=as.Date("2012-10-29"), y=158, color="red", label="Sandy",size=6)+
+  geom_vline(aes(xintercept =as.Date("2019-01-01")), color="black", linetype=2,alpha=0.5)+
+  annotate("text",x=as.Date("2019-01-01"), y=158, color="black", label="Local Law 55",size=6)+
+  geom_vline(aes(xintercept =as.Date("2021-09-01")), color="blue", linetype=2, alpha=0.5)+
+  annotate("text",x=as.Date("2021-09-01"), y=158, color="blue", label="Ida",size=6)+
+  geom_vline(aes(xintercept =as.Date("2023-09-29")), color="darkred", linetype=2, alpha=0.5)+
+  annotate("text",x=as.Date("2023-09-29"), y=158, color="darkred", label="Ophelia",size=6)
+
+figure1
+ggsave("mold_figure1.png", figure1, width = 16, height = 8, dpi = 600)
+```
+
+#Figure 2
+##calculate overall and after storms, then join
+```{r}
+tract_overall<-complaintsrecoded%>%
+  filter(!is.na(BCT2020))%>%
+  group_by(BCT2020)%>%
+  summarize(n_ovrall = n())%>%
+  ungroup()
+
+test<-complaintsrecoded%>%
+  filter(!is.na(BCT2020))%>%
+  mutate(storm_period90 = case_when(
+          day > as.Date("2011-08-21") & day <= (as.Date("2011-08-21")+90) ~ "Iren",
+          day > as.Date("2012-10-29") & day <= (as.Date("2012-10-29")+90) ~ "Sand",
+          day > as.Date("2021-09-01") & day <= (as.Date("2021-09-01")+90) ~ "Ida",
+         day > as.Date("2023-09-29") & day <= (as.Date("2023-09-29")+90) ~ "Ophe"))%>%
+  group_by(BCT2020, storm_period90)%>%
+  summarize(n = n())%>%
+  ungroup()
+
+tracts_stormperiods90<-complaintsrecoded%>%
+  filter(!is.na(BCT2020))%>%
+  mutate(storm_period90 = case_when(
+          day > as.Date("2011-08-21") & day <= (as.Date("2011-08-21")+90) ~ "Iren",
+          day > as.Date("2012-10-29") & day <= (as.Date("2012-10-29")+90) ~ "Sand",
+          day > as.Date("2021-09-01") & day <= (as.Date("2021-09-01")+90) ~ "Ida",
+         day > as.Date("2023-09-29") & day <= (as.Date("2023-09-29")+90) ~ "Ophe"))%>%
+  group_by(BCT2020, storm_period90)%>%
+  summarize(n = n())%>%
+  ungroup()%>%
+  complete(BCT2020, storm_period90)%>%
+  mutate(n= if_else(is.na(n),0,n))%>%
+  filter(!is.na(storm_period90))%>%
+  pivot_wider(id_cols = BCT2020, 
+              names_from = storm_period90, 
+              values_from = n,
+              names_glue = "{storm_period90}3m" # Adds "_suffix" to each new column name)
+              )
+
+tracts_stormperiods180<-complaintsrecoded%>%
+  filter(!is.na(BCT2020))%>%
+  mutate(storm_period180 = case_when(
+          day > as.Date("2011-08-21") & day <= (as.Date("2011-08-21")+180) ~ "Iren",
+          day > as.Date("2012-10-29") & day <= (as.Date("2012-10-29")+180) ~ "Sand",
+          day > as.Date("2021-09-01") & day <= (as.Date("2021-09-01")+180) ~ "Ida",
+         day > as.Date("2023-09-29") & day <= (as.Date("2023-09-29")+180) ~ "Ophe"))%>%
+  group_by(BCT2020, storm_period180)%>%
+  summarize(n = n())%>%
+  ungroup()%>%
+  complete(BCT2020, storm_period180)%>%
+  mutate(n= if_else(is.na(n),0,n))%>%
+  filter(!is.na(storm_period180))%>%
+  pivot_wider(id_cols = BCT2020, 
+              names_from = storm_period180, 
+              values_from = n,
+              names_glue = "{storm_period180}6m" # Adds "_suffix" to each new column name
+      )
+
+
+tractstorms<-left_join(tracts_stormperiods90, tracts_stormperiods180, by = "BCT2020")
+
+tractstorms <- left_join(tract_overall, tractstorms, by="BCT2020")
+
+#write.csv(tractstorms, "tractstorms.csv")
+
+```
+
+## join to tracts info HU (housing units)
+```{r}
+#read in tract shapefile with Census pop and housing unit info
+tractstorms<-read.csv("tractstorms.csv")
+withpopulation <- st_read("nyc_tracts_2020_infoHU_withpop.shp")
+
+
+tracts<-left_join(withpopulation, tractstorms, by = "BCT2020")
+
+summary(tracts$n_ovrall)
+
+```
+
+## cleaning
+```{r}
+
+#calculate average people per unit in tracts across city
+# tracts%>%
+#   st_drop_geometry()%>%
+#    mutate(perunit = totpop/HU_tot)%>%
+#    filter(HU_tot>0)%>%
+#    summarize(mean = mean(perunit))
+# 2.92
+
+#calculate average % rental per tract across city
+# tracts%>%
+#   st_drop_geometry()%>%
+#    mutate(proprenters = HU_rent/HU_tot)%>%
+#    filter(HU_tot>0)%>%
+#    summarize(mean = mean(proprenters))
+# 0.665
+
+tracts<-tracts%>%
+  #exclude tracts with 0 housing units
+  filter(HU_rent>=100)%>%
+  mutate(
+    #fill in 0s for tracts with NAs
+    n_ovrall = if_else(is.na(n_ovrall), 0, n_ovrall),
+    n1000rent = n_ovrall/HU_rent * 1000,
+    across(
+      .cols = ends_with("3m") | ends_with("6m"),
+      .fns  = ~ replace_na(.x, 0)
+    ),
+         )%>%
+  #add rate columns, per 1000 units
+  mutate(
+    across(
+      .cols = ends_with("3m") | ends_with("6m"),
+      .fns  = ~ replace_na(.x, 0) / HU_rent *1000,
+      .names = "R{col}"
+    )
+  )
+
+summary(tracts$n_per1000rent)
+
+summary(tracts$RSand6m)
+
+#st_write(tracts, "tracts_withrates2.shp")
+```
+##GeoDa
+
+NOTE: use neighbors weights file nyc_tracts_2020_infoHU_withpop.gal
+
+
+##key for LISA results from GeoDa
+0 Not significant
+1 High-High (red)
+2 Low-Low (dark blue)
+3 Low-High (light blue)
+4 High-Low (pink)
+
+## read in GeoDa LISA results
+```{r}
+tractsLISA<-st_read("LISAmaps_GeoDa/LISAresults_7-25-26.shp")
+
+LISAresults<- tractsLISA%>%
+  st_drop_geometry()
+
+```
+
+
+## read in shoreline clipped file
+```{r}
+tractsfull<-st_read("nyctracts2020shorelineclipped/nyct2020.shp")
+
+sf::st_crs(tractsfull)
+
+ggplot(tractsfull)+
+  geom_sf()
+```
+
+##read borough boundary file
+```{r}
+boroughboundaries<-st_read("boroughboundaries/boroughboundaries.shp")
+
+boroughboundaries <- st_transform(boroughboundaries, st_crs(tractsfull))
+
+ggplot(boroughboundaries)+
+  geom_sf()
+```
+
+
+## join to tract shoreline clipped file
+```{r}
+tractsfullLISA<-left_join(tractsfull, LISAresults, by="GEOID")
+```
+
+## map LISA
+```{r}
+tractsfullLISA<-tractsfullLISA%>%
+    mutate(
+    across(
+      starts_with("C_"),   # adjust if your columns have different naming
+      ~ case_when(
+        .x == 0 ~ "Not sig.",
+        .x == 1 ~ "High-High",
+        .x == 2 ~ "Low-Low",
+        .x == 3 ~ "Low-High",
+        .x == 4 ~ "High-Low",
+        TRUE ~ NA_character_
+      ),
+      .names = "{.col}"   # keep original & create new labeled vars
+    )
+  )
+
+# Define colors similar to GeoDa defaults
+lisa_colors <- c(
+  "Not sig." = "lightgrey",
+  "High-High" = "red",
+  "Low-Low" = "blue",
+  "Low-High" = "lightblue",
+  "High-Low" = "pink"
+)
+
+# Plot LISA cluster map
+LISA_overall<-ggplot(tractsfullLISA) +
+  geom_sf(aes(fill = C_overall), color = NA, size = 0.2) +
+  geom_sf(data=boroughboundaries, fill=NA,color="black",size=0.5)+
+  scale_fill_manual(values = lisa_colors, na.value = "#aaa") +
+  theme_void(base_size = 20) +
+  labs(fill = "LISA Cluster \nType \nI=0.635")+
+  theme(legend.position = c(0.1, 0.95), # Position the legend's reference point
+  legend.justification = c("left", "top") # Align the legend's top-left corner to that point
+  )
+```
+## LISA for all storms
+```{r}
+
+tracts_LISAstormperiods <- tractsfullLISA %>%
+  pivot_longer(names_to = "storm", 
+               cols = matches("C_(Ida|Sand|Ophe|Iren)(3m)"), #can add |6m to also do 6m 
+               values_to = "cat")%>%
+  select(GEOID, storm, cat)%>%
+  mutate(storm = case_when(storm=="C_Ida3m" ~"Ida \nI=0.289",
+                           storm=="C_Iren3m" ~"Irene \nI=0.181",
+                           storm=="C_Ophe3m" ~"Ophelia \nI=0.274",
+                           storm=="C_Sand3m" ~"Sandy \nI=0.256",),
+         storm = factor(storm, levels=c("Irene \nI=0.181","Sandy \nI=0.256","Ida \nI=0.289","Ophelia \nI=0.274")))
+
+stormLISAmap<-ggplot(tracts_LISAstormperiods) +
+  geom_sf(aes(fill = cat), color = NA, size = 0.2) +
+  scale_fill_manual(values = lisa_colors, na.value = "#aaa") +
+  theme_void(base_size = 18) +
+  facet_wrap(~storm)+
+  labs(fill = "")+
+  theme(strip.text = element_text(size = 18, hjust = 0.1, vjust = -4.5),strip.background = element_blank(), strip.clip = "off")
+```
+
+
+
+## map rates 
+```{r}
+tractstorms<- read.csv("tractstorms.csv")
+
+withpopulation <- st_read("nyc_tracts_2020_infoHU_withpop.shp")
+
+withpopulation <- withpopulation%>%
+    filter(HU_tot>0)
+
+
+tracts<-left_join(withpopulation, tractstorms, by = "BCT2020")
+
+
+tracts_tojoin<-tracts%>%
+  st_drop_geometry()
+
+mapping <- left_join(tractsfull, tracts_tojoin, by="GEOID")
+```
+
+## map rates overall
+```{r}
+tracts_overall <- mapping %>%
+  pivot_longer(names_to = "storm", 
+               cols = n_ovrall, #can add |6m to also do 6m 
+               values_to = "rate")%>%
+  select(GEOID, storm, rate)
+
+summary(tracts_overall$rate)
+
+breaks<-c(0,50,100,200,1017)
+
+tracts_overall<-tracts_overall%>%
+  mutate(rate_breaks=cut(rate, breaks = breaks, include.lowest = TRUE, dig.lab = 10), 
+         #dig.lab makes numbers whole numbers not scientific notation
+         storm = case_when(storm=="n1000rent" ~"Overall")) 
+  
+overallratesmap<-ggplot(tracts_overall) +
+  geom_sf(aes(fill=rate_breaks), color = NA)+ #"color" sets the border color
+  geom_sf(data=boroughboundaries, fill=NA,color="black",size=0.5)+
+  geom_sf_label(data=boroughboundaries,
+    aes(label = boroname),           # Map the name column to the label aesthetic
+    size = 4,                          # Adjust label size
+    color = "black",                   # Adjust label color
+    fill = "white",                    # Background color for geom_sf_label
+    alpha=0.7,
+    fun.geometry = sf::st_point_on_surface # Optional: ensures labels are inside irregular polygons
+  )+
+  theme_void(base_size = 20) + #removes axes
+  scale_fill_manual(values =c("#dcf7e4","#7BBD8A","#2E733C","#061C0B"),
+    na.value = "grey70")+
+  labs(fill = "Complaints \nper 1000 \nrental units")+
+  theme(strip.text = element_text(size = 22), strip.clip = "off",
+  legend.position = c(0.1, 0.95), # Position the legend's reference point
+  legend.justification = c("left", "top") # Align the legend's top-left corner to that point
+)
+
+```
+
+##map rates storm3m
+```{r}
+tracts_stormperiods <- mapping %>%
+  pivot_longer(names_to = "storm", 
+               cols = matches("(Ida|Sand|Ophe|Iren)(3m)"), #can add |6m to also do 6m 
+               values_to = "rate")%>%
+  select(GEOID, storm, rate)
+
+summary(tracts_stormperiods$rate)
+
+breaks<-c(0,2,5,10,134)
+
+tracts_stormperiods<-tracts_stormperiods%>%
+  mutate(rate_breaks=cut(rate, breaks = breaks, include.lowest = TRUE),
+         storm = case_when(storm=="Ida3m" ~"Ida",
+                           storm=="Iren3m" ~"Irene",
+                           storm=="Ophe3m" ~"Ophelia",
+                           storm=="Sand3m" ~"Sandy",),
+         storm = factor(storm, levels=c("Irene","Sandy","Ida","Ophelia")))
+  
+stormratesmap<-ggplot(tracts_stormperiods) +
+  geom_sf(aes(fill=rate_breaks), color = NA)+ #"color" sets the border color
+  theme_void(base_size = 18) + #removes axes
+  scale_fill_manual(values =c("#dcf7e4","#7BBD8A","#2E733C","#061C0B"),
+    na.value = "grey70")+
+  facet_wrap(~storm)+
+  labs(fill = "")+
+  theme(strip.text = element_text(size = 18, hjust = 0.1, vjust = -4.5), strip.clip = "off")
+
+stormratesmap
+```
+
+# LISA 3m vs 6m sensitivity
+```{r}
+
+```
+
+
+## Export Figure 2
+```{r}
+library(cowplot)
+combined_plot <- plot_grid(
+                           #list objects Left -> Right, Top row -> Bottom row
+                           overallratesmap, LISA_overall, stormratesmap, stormLISAmap,
+                           rel_widths = c(1,1), rel_heights = c(1,1), #specify relative widths and heights if applicable
+                           ncol = 2, nrow=2 #specify number of rows/columns if applicable
+                           )
+
+# Save the combined plot
+save_plot("mold_figure2_grid_7-25-26.png", combined_plot, base_height = 10, base_asp = 1.2, dpi=600)
+```
+
+
+
+#Figure S1
+```{r}
+#Read in data
+#compute day of week
+dailycomparison<-dailycomparison%>%
+  mutate(dayofweek = wday(day, label = TRUE), )
+
+#check day of week
+table(dailycomparison$dayofweek) #should be equal if full weeks used
+
+#count complaints per day of week
+weekdaycount<-dailycomparison%>%
+  group_by(dayofweek)%>%
+  summarize(Overall = sum(dailyn_overall),
+            Mold = sum(dailyn_mold, na.rm=T), #four days had 0 mold complaints (potential system issue 4/12/24-4/14/24?)
+            )%>%
+  ungroup()
+
+#pivot long for faceted graph
+weekdaycount_long <-weekdaycount%>%
+  pivot_longer(cols = c(Overall,Mold), names_to = "call_type", values_to = c("Count"))%>%
+  mutate(call_type=factor(call_type, levels = c("Overall","Mold")))
+
+weekdaycount_long<-weekdaycount_long%>%
+  mutate(calls_per_day= Count/791)
+
+figureS1<-ggplot(weekdaycount_long, aes(x=dayofweek, y=calls_per_day))+
+  geom_col()+
+  facet_grid(call_type~.,scales = "free_y")+
+  scale_y_continuous(
+    labels = scales::comma
+  )+
+  labs(x="Day of week", y="Average calls per day")+
+  theme_classic(base_size = 20)
+
+
+ggsave("mold_figureS1.png", figureS1, width = 10, height = 8, dpi = 300)
+```
+
