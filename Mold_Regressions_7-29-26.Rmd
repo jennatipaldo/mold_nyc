@@ -1,0 +1,181 @@
+---
+title: "Mold_Regressions"
+author: "Jenna Tipaldo"
+date: "2027-7-29"
+output: html_document
+---
+# Load Packages
+
+```{r load}
+library(data.table)
+library(tidyverse)
+library(lubridate) #for dates
+library(zoo) # for yearmon()
+library(stats) #for ts()
+library(TSstudio)
+library(haven)
+library(sjPlot) #model tables
+library(tidycensus) #for Census data
+library(spatialreg)
+library(spdep)
+library(rgeoda)
+library(stargazer)
+library(labelled)
+```
+
+#Load files
+```{r}
+#tracts with pop & housing info
+nyc_tracts_2020_infoHU_withpop<-st_read("nyc_tracts_2020_infoHU_withpop.shp")
+
+#mold complaints
+complaintsrecoded <- read_csv("complaintsrecoded.csv")
+```
+
+
+# get count of calls per tract across entire period
+```{r}
+tract_overall<-complaintsrecoded%>%
+  filter(!is.na(BCT2020))%>%
+  group_by(BCT2020)%>%
+  summarize(n_ovrall = n())%>%
+  ungroup()
+```
+
+#join count to tract data 
+Exclude tracts w 0 housing units and 0 complaints (jails)
+```{r}
+tracts_regression<-nyc_tracts_2020_infoHU_withpop%>%
+  left_join(tract_overall, by = "BCT2020")
+
+tracts_regression<-tracts_regression%>%
+  filter(HU_tot>0)%>%
+  mutate(n_ovrall= if_else(is.na(n_ovrall),0,n_ovrall))
+
+summary(tracts_regression$n_ovrall)
+```
+
+
+# visualize
+```{r}
+summary(tracts_regression$n_ovrall)
+mean(tracts_regression$n_ovrall)
+sd(tracts_regression$n_ovrall, na.rm = T)
+
+ggplot(tracts_regression, aes(x=n_ovrall))+
+  geom_histogram(binwidth = 10)+
+  theme_minimal(base_size = 20)+
+  labs(x="# calls per tract in overall period", y="Frequency (Tracts)")
+```
+
+# Clean and label variables for regression
+```{r}
+tracts_regression <- tracts_regression%>%
+  mutate(MedianIncome10k = mednc20/10000,
+         nonHispanicBlackPct = NHblc20,
+         LowEnglishProficiencyPct = lwngl20,
+         n1000rent = n_ovrall / HU_rent * 1000,
+         log_n1000rent = log(n1000rent+0.01))
+```
+
+#Visualize outcome as linear and log-transformed
+```{r}
+ggplot(tracts_regression, aes(x=n1000rent))+
+  geom_histogram(bins = 100)+
+  theme_minimal(base_size = 20)+
+  labs(x="# calls per tract in overall period", y="Frequency (Tracts)")
+
+mean(tracts_regression$n1000rent, na.rm=T)
+sd(tracts_regression$n1000rent, na.rm = T)
+
+ggplot(tracts_regression, aes(x=log_n1000rent))+
+  geom_histogram(bins = 100)+
+  theme_minimal(base_size = 20)+
+  labs(x="# calls per tract in overall period", y="Frequency (Tracts)")
+
+#library(labelled)
+var_label(tracts_regression$MedianIncome10k)<- "Median Income"
+var_label(tracts_regression$nonHispanicBlackPct)<- "% non-Hispanic Black"
+var_label(tracts_regression$LowEnglishProficiencyPct)<- "% Limited English Proficiency"
+```
+
+#Linear Model
+```{r}
+model1<-glm(n1000rent ~ MedianIncome10k + nonHispanicBlackPct + LowEnglishProficiencyPct, family = gaussian(), data=tracts_regression)
+
+plot(model1)
+summary(model1)
+
+tab_model(model1, dv.labels = c("Complaints per 1000 rental units"))
+
+model1_log<-glm(log_n1000rent ~ MedianIncome10k + nonHispanicBlackPct + LowEnglishProficiencyPct, family = gaussian(), data=tracts_regression)
+
+plot(model1_log)
+
+tab_model(model1,model1_log, dv.labels = c("Complaints per 1000 rental units","Log(Complaints per 1000 rental units)"), digits = 3)
+
+```
+
+#Spatial Error
+
+##Spatial weights in spdep format
+```{r}
+# read the .gal file 
+id_vector <- tracts_regression$GEOID
+
+nb <- spdep::read.gal("nyc_tracts_2020_infoHU_withpop.gal", region.id = id_vector)
+
+# Convert neighbor list to listw object
+listw <- nb2listw(nb, style = "W")  # W = row-standardized weights
+```
+
+
+##Spatial error model
+```{r}
+model1_sem <- errorsarlm(
+  n1000rent ~ MedianIncome10k + nonHispanicBlackPct + LowEnglishProficiencyPct,
+  data = tracts_regression,
+  listw = listw,
+  method = "eigen"
+)
+
+#with log-transforms
+model2_sem_log <- errorsarlm(
+  log_n1000rent ~ MedianIncome10k + nonHispanicBlackPct + LowEnglishProficiencyPct,
+  data = tracts_regression,
+  listw = listw,
+  method = "eigen"
+)
+
+summary(model1_sem)
+
+stargazer(model1_sem, model2_sem_log, 
+          out = "sem_7-29-26.html", #save file
+          report = "vc*p" #for p-values
+          ) 
+
+
+```
+
+##Pseudo R-sq
+```{r}
+fitted_values <- fitted(model1_sem)
+
+# Extract observed values only for complete cases of model inputs
+observed_values <- tracts_regression$n1000rent[!is.na(tracts_regression$log_n1000rent) & !is.na(tracts_regression$MedianIncome10k)&!is.na(tracts_regression$nonHispanicBlackPct)&!is.na(tracts_regression$LowEnglishProficiencyPct)]
+SSR <- sum((observed_values - fitted_values)^2)  # Sum of squared residuals
+SST <- sum((observed_values - mean(observed_values))^2)  # Total sum of squares
+r_squared <- 1 - (SSR / SST)
+r_squared
+
+
+fitted_values <- fitted(model2_sem_log)
+
+# Extract observed values only for complete cases of model inputs
+observed_values <- tracts_regression$log_n1000rent[!is.na(tracts_regression$log_n1000rent) & !is.na(tracts_regression$MedianIncome10k)&!is.na(tracts_regression$nonHispanicBlackPct)&!is.na(tracts_regression$LowEnglishProficiencyPct)]
+SSR <- sum((observed_values - fitted_values)^2)  # Sum of squared residuals
+SST <- sum((observed_values - mean(observed_values))^2)  # Total sum of squares
+r_squared <- 1 - (SSR / SST)
+r_squared
+```
+
