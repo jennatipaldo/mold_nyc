@@ -63,4 +63,12 @@ _Citations_
 Hurricane Sandy inundation zone shapefiles were downloaded from NYC Open Data. 
 
 _Citation_ 
-- NYC Open Data. (n.d.). Sandy Inundation Zone. Retrieved May 22, 2023, from https://data.cityofnewyork.us/Environment/Sandy-Inundation-Zone/uyj8-7rv5  
+- NYC Open Data. (n.d.). Sandy Inundation Zone. Retrieved May 22, 2023, from https://data.cityofnewyork.us/Environment/Sandy-Inundation-Zone/uyj8-7rv5
+
+# Files
+## Mold_CensusDataCleaning_public.Rmd
+Contains code to create analytic file of census tracts with key variables 
+## Mold_Regressions.Rmd 
+Contains code to run and output regressions including linear, log-linear and spatial error models. 
+## Mold_Figures.Rmd
+Contains code to create figures. 
